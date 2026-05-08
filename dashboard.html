@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Transformer · Training Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+  *, *::before, *::after {margin:0;padding:0;box-sizing:border-box;}
+:root {
+  /* SpaceX-inspired dark navy background with subtle star‑field gradient */
+  --bg: linear-gradient(135deg, #0a0a1a, #001133);   /* deep space */
+  --surface: #111122;          /* cards / panels */
+  --border: #222244;           /* subtle borders */
+  --text: #e0e0ff;            /* primary text – soft cyan */
+  --muted: #8899bb;           /* secondary / subtle text */
+  /* Primary accent: SpaceX orange/red */
+  --accent: #ff6600;          /* vivid orange */
+  --accent-bg: rgba(255,102,0,0.08);
+  /* Secondary accent: Anthropic teal for charts/metrics */
+  --accent2: #10a37f;         /* Anthropic teal */
+  --radius: 8px;
+  --shadow: 0 2px 12px rgba(0,0,0,0.4);
+}
+  body {font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.5;-webkit-font-smoothing:antialiased;}
+  .topbar {display:flex;align-items:center;justify-content:space-between;padding:16px 24px;background:var(--surface);box-shadow:var(--shadow);border-bottom:1px solid var(--border);}
+  .topbar-left {display:flex;align-items:center;gap:12px;}
+  .topbar-logo {width:24px;height:24px;border-radius:6px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;color:#fff;}
+  .topbar-title {font-size:14px;font-weight:500;}
+  .topbar-sub {font-size:14px;color:var(--muted);}
+  .status-pill {display:flex;align-items:center;gap:6px;padding:4px 12px;border-radius:12px;font-size:12px;font-weight:500;background:var(--accent-bg);color:var(--accent);border:1px solid rgba(255,102,0,0.2);}
+  .status-pill .dot {width:6px;height:6px;border-radius:50%;background:var(--accent);animation:blink 2s infinite;}
+  .status-pill.done .dot{animation:none;}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+
+  /* Tabs */
+  .tabs {display:flex;border-bottom:1px solid var(--border);background:var(--surface);}
+  .tab {flex:1;padding:12px 0;text-align:center;font-size:13px;font-weight:500;color:var(--muted);cursor:pointer;transition:color .2s;}
+  .tab.active {color:var(--accent);border-bottom:2px solid var(--accent);background:var(--surface);}
+  .tab-content {display:none;padding:24px;}
+  .tab-content.active {display:block;}
+
+  .container {max-width:1240px;margin:auto;}
+  .metrics-row {display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px;margin-bottom:24px;}
+  .metric {background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px;box-shadow:var(--shadow);}
+  .metric-label {font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;display:flex;align-items:center;gap:4px;}
+  .metric-label .tooltip {position:relative;cursor:help;border-bottom:1px dotted var(--muted);}
+  .metric-label .tooltip:hover::after {content:attr(data-tip);position:absolute;bottom:100%;left:50%;transform:translateX(-50%);background:#222;color:#fff;padding:4px 8px;border-radius:4px;font-size:10px;white-space:nowrap;z-index:10;}
+  .metric-value {font-family:'IBM Plex Mono',monospace;font-size:16px;color:var(--text);font-weight:500;}
+  .metric-value.hi {color:var(--accent);}
+
+  .progress-track {height:4px;background:var(--border);border-radius:2px;margin-bottom:24px;overflow:hidden;}
+  .progress-fill {height:100%;background:var(--accent);border-radius:2px;transition:width .4s ease;}
+
+  .grid-2, .grid-3 {display:grid;gap:16px;}
+  .grid-2 {grid-template-columns:1fr 1fr;}
+  .grid-3 {grid-template-columns:1fr 1fr 1fr;}
+  @media(max-width:1000px){.grid-3{grid-template-columns:1fr 1fr}}
+  @media(max-width:720px){.grid-2,.grid-3{grid-template-columns:1fr}}
+
+  .card {background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);}
+  .card-header {font-size:12px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:12px;display:flex;align-items:center;gap:8px;}
+  .card-header .icon {font-size:13px;opacity:.6;}
+  canvas {width:100% !important;}
+  #heatmapCanvas, #embeddingCanvas {border-radius:4px;cursor:crosshair;}
+
+  .sample {margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--border);}
+  .sample:last-child {margin-bottom:0;padding-bottom:0;border-bottom:none;}
+  .sample-label {font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px;}
+  .sample-label.src{color:var(--muted)}
+  .sample-label.tgt{color:var(--accent)}
+  .sample-label.pred{color:#5b9bf5}
+  .sample-text {font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--muted);line-height:1.5;max-height:120px;overflow-y:auto;}
+  table {width:100%;border-collapse:collapse;}
+  th, td {padding:8px 12px; border-bottom:1px solid var(--border);}
+  th {font-size:11px;color:var(--muted);text-align:left;background:var(--surface);}
+  td {font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text);}
+  .tag {display:inline-block;padding:2px 6px;border-radius:4px;background:var(--accent-bg);color:var(--accent);font-size:10px;}
+  .btn {background:var(--accent-bg);border:none;color:var(--accent);border-radius:4px;padding:4px 8px;font-size:12px;cursor:pointer;transition:background .2s;}
+  .btn:hover{background:var(--accent);color:#fff;}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="topbar-logo">T</div>
+    <span class="topbar-title">Transformer</span><span class="topbar-sub">Training Dashboard</span>
+  </div>
+  <div class="status-pill" id="statusPill"><div class="dot"></div><span id="statusText">Connecting</span></div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('training')">Training</div>
+  <div class="tab" onclick="switchTab('embeddings')">Embedding Map</div>
+</div>
+
+<div class="tab-content active" id="tab-training">
+  <div class="container">
+    <div class="metrics-row">
+      <div class="metric"><div class="metric-label">Epoch</div><div class="metric-value hi" id="mEpoch">–</div></div>
+      <div class="metric"><div class="metric-label">Batch</div><div class="metric-value" id="mBatch">–</div></div>
+      <div class="metric"><div class="metric-label">Train Loss</div><div class="metric-value" id="mTrainLoss">–</div></div>
+      <div class="metric"><div class="metric-label">Smoothed</div><div class="metric-value" id="mSmoothed">–</div></div>
+      <div class="metric"><div class="metric-label">Val Loss</div><div class="metric-value" id="mValLoss">–</div></div>
+      <div class="metric"><div class="metric-label">Accuracy</div><div class="metric-value" id="mAccuracy">–</div></div>
+      <div class="metric" id="gradMetric"><div class="metric-label">Grad Norm</div><div class="metric-value" id="mGradNorm">–</div></div>
+      <div class="metric"><div class="metric-label">Perplexity</div><div class="metric-value" id="mPpl">–</div></div>
+      <div class="metric"><div class="metric-label"><span class="tooltip" data-tip="Estimated logic IQ (human avg ≈100)">Est. IQ</span></div><div class="metric-value hi" id="mIQ">–</div></div>
+      <div class="metric"><div class="metric-label">Speed (t/s)</div><div class="metric-value" id="mSpeed">–</div></div>
+      <div class="metric"><div class="metric-label">Elapsed</div><div class="metric-value" id="mTime">–</div></div>
+      <div class="metric"><div class="metric-label" title="Total trainable parameters">Params</div><div class="metric-value hi" id="mParams">–</div></div>
+      <div class="metric"><div class="metric-label" title="Average time per batch (seconds)">Batch Time</div><div class="metric-value" id="mBatchTime">–</div></div>
+      <div class="metric"><div class="metric-label" title="Approx. memory usage (GB)">Memory</div><div class="metric-value" id="mMemory">–</div></div>
+      <div class="metric"><div class="metric-label" title="Average attention entropy per head">Attn Entropy</div><div class="metric-value" id="mAttnEntropy">–</div></div>
+    </div>
+    <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+
+    <div class="grid-2">
+      <div class="card"><div class="card-header"><span class="icon">▎</span>Loss</div><canvas id="lossChart" height="200"></canvas></div>
+      <div class="card"><div class="card-header"><span class="icon">▎</span>Token Accuracy</div><canvas id="accChart" height="200"></canvas></div>
+    </div>
+    <div class="grid-3">
+      <div class="card"><div class="card-header"><span class="icon">▎</span>Learning Rate</div><canvas id="lrChart" height="180"></canvas></div>
+      <div class="card"><div class="card-header"><span class="icon">▎</span>Gradient Norm</div><canvas id="gradChart" height="180"></canvas></div>
+      <div class="card"><div class="card-header"><span class="icon">▎</span>Perplexity</div><canvas id="pplChart" height="180"></canvas></div>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><span class="icon">▎</span>Encoder Self‑Attention</div>
+        <canvas id="heatmapCanvas" width="400" height="400"></canvas>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="icon">▎</span>Sample Predictions
+          <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+            <button class="btn" onclick="prevSample()">◀</button>
+            <span id="samplePage" style="font-size:12px;color:var(--muted)">1/1</span>
+            <button class="btn" onclick="nextSample()">▶</button>
+          </div>
+        </div>
+        <div id="predsContainer"><p style="color:var(--muted);font-size:13px">Waiting for validation…</p></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-header"><span class="icon">▎</span>Epoch Summary</div>
+      <table>
+        <thead><tr><th>Epoch</th><th>Train Loss</th><th>Val Loss</th><th>Accuracy</th><th>Perplexity</th><th>Est. IQ</th><th></th></tr></thead>
+        <tbody id="epochBody"><tr><td colspan="7" style="color:var(--muted)">No epochs completed.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="tab-content" id="tab-embeddings">
+  <div class="container">
+    <div class="card">
+      <div class="card-header"><span class="icon">▎</span>Word Embedding Space – PCA Projection</div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Each dot is a word; lines connect nearest neighbors. Hover to explore.</p>
+      <canvas id="embeddingCanvas" width="900" height="600"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ── Tabs ──────────────────────────────────────────── */
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+  document.getElementById('tab-'+name).classList.add('active');
+  document.querySelector(`.tab:nth-child(${name==='training'?1:2})`).classList.add('active');
+}
+
+/* ── Chart defaults ────────────────────────────────── */
+const G='rgba(255,255,255,0.04)', TK='rgba(255,255,255,0.5)';
+const base={responsive:true,animation:{duration:200},interaction:{mode:'nearest',intersect:false},plugins:{legend:{labels:{color:TK,font:{family:'Inter',size:11},boxWidth:10,padding:14}},tooltip:{backgroundColor:'#111',bodyFont:{family:'IBM Plex Mono',size:12},cornerRadius:6,padding:10}},scales:{x:{grid:{color:G,drawTicks:false},ticks:{color:TK,maxTicksLimit:8,font:{size:10}},border:{color:'transparent'}},y:{grid:{color:G,drawTicks:false},ticks:{color:TK,font:{size:10}},border:{color:'transparent'}}}};
+function opts(){return JSON.parse(JSON.stringify(base));}
+const lossChart=new Chart(document.getElementById('lossChart'),{type:'line',data:{labels:[],datasets:[{label:'Raw',data:[],borderColor:'rgba(255,102,0,0.3)',borderWidth:1,pointRadius:0,fill:false,tension:.3},{label:'Smoothed',data:[],borderColor:'var(--accent2)',backgroundColor:'rgba(16,163,127,0.06)',borderWidth:2,pointRadius:0,fill:true,tension:.4},{label:'Val',data:[],borderColor:'#5b9bf5',borderWidth:2,pointRadius:3,pointBackgroundColor:'#5b9bf5',fill:false}]},options:opts()});
+const accChart=new Chart(document.getElementById('accChart'),{type:'line',data:{labels:[],datasets:[{label:'Train',data:[],borderColor:'rgba(16,163,127,0.3)',borderWidth:1,pointRadius:0,fill:false,tension:.3},{label:'Val',data:[],borderColor:'#5b9bf5',borderWidth:2,pointRadius:4,pointBackgroundColor:'#5b9bf5',fill:false}]},options:opts()});
+const lrChart=new Chart(document.getElementById('lrChart'),{type:'line',data:{labels:[],datasets:[{label:'LR',data:[],borderColor:'var(--accent)',backgroundColor:'rgba(255,102,0,0.06)',borderWidth:1.5,pointRadius:0,fill:true,tension:.3}]},options:opts()});
+const gradChart=new Chart(document.getElementById('gradChart'),{type:'line',data:{labels:[],datasets:[{label:'Grad Norm',data:[],borderColor:'#ef6b6b',backgroundColor:'rgba(239,107,107,0.06)',borderWidth:1.5,pointRadius:0,fill:true,tension:.3}]},options:opts()});
+const pplChart=new Chart(document.getElementById('pplChart'),{type:'line',data:{labels:[],datasets:[{label:'Perplexity',data:[],borderColor:'#a78bfa',backgroundColor:'rgba(167,139,250,0.06)',borderWidth:2,pointRadius:4,pointBackgroundColor:'#a78bfa',fill:true,tension:.3}]},options:opts()});
+
+/* ── Heatmap Interaction ───────────────────────────── */
+let hData=null, hTokens=null;
+let hMouseX=-1, hMouseY=-1;
+function drawHeatmap(){
+  if(!hData) return;
+  const c=heatmapCanvas, ctx=c.getContext('2d');
+  const n=hData.length, m=56, s=Math.floor(Math.min(340,c.clientWidth-m-10)/n);
+  c.width=m+n*s+8; c.height=m+n*s+8;
+  ctx.clearRect(0,0,c.width,c.height);
+  let hoverI=-1, hoverJ=-1;
+  if(hMouseX>=m && hMouseX<m+n*s && hMouseY>=m && hMouseY<m+n*s){
+    hoverJ=Math.floor((hMouseX-m)/s);
+    hoverI=Math.floor((hMouseY-m)/s);
+  }
+  for(let i=0;i<n;i++){
+    for(let j=0;j<n;j++){
+      const v=hData[i][j];
+      ctx.fillStyle=`rgba(${Math.round(16)},${Math.round(22+v*141)},${Math.round(22+v*105)},${.25+v*.75})`;
+      ctx.fillRect(m+j*s,m+i*s,s-1,s-1);
+      if(i===hoverI && j===hoverJ){ctx.strokeStyle='#fff';ctx.lineWidth=1;ctx.strokeRect(m+j*s,m+i*s,s-1,s-1);}
+    }
+  }
+  ctx.fillStyle='#666';ctx.font='10px IBM Plex Mono,monospace';ctx.textAlign='right';
+  for(let i=0;i<n&&i<hTokens.length;i++){
+    ctx.fillStyle=(i===hoverI)?'#fff':'#666';
+    ctx.fillText(hTokens[i].slice(0,6),m-5,m+i*s+s/2+3);
+  }
+  ctx.textAlign='center';
+  for(let j=0;j<n&&j<hTokens.length;j++){
+    ctx.save();ctx.translate(m+j*s+s/2,m-5);ctx.rotate(-Math.PI/4);
+    ctx.fillStyle=(j===hoverJ)?'#fff':'#666';
+    ctx.fillText(hTokens[j].slice(0,6),0,0);
+    ctx.restore();
+  }
+  if(hoverI!==-1 && hoverJ!==-1){
+    const v=hData[hoverI][hoverJ];
+    const txt=`${hTokens[hoverJ]}→${hTokens[hoverI]}: ${(v*100).toFixed(1)}%`;
+    ctx.fillStyle='rgba(0,0,0,0.85)';
+    ctx.fillRect(hMouseX+10,hMouseY+10,ctx.measureText(txt).width+12,24);
+    ctx.fillStyle='#fff';
+    ctx.textAlign='left';
+    ctx.fillText(txt,hMouseX+16,hMouseY+26);
+  }
+}
+heatmapCanvas.addEventListener('mousemove',e=>{const r=heatmapCanvas.getBoundingClientRect();hMouseX=(e.clientX-r.left)*(heatmapCanvas.width/r.width);hMouseY=(e.clientY-r.top)*(heatmapCanvas.height/r.height);drawHeatmap();});
+heatmapCanvas.addEventListener('mouseleave',()=>{hMouseX=-1;hMouseY=-1;drawHeatmap();});
+
+/* ── Embedding Map Interaction ─────────────────────── */
+let eNodes=null, eEdges=null;
+let eMouseX=-1, eMouseY=-1;
+function drawEmbeddings(){
+  const c=embeddingCanvas, ctx=c.getContext('2d');
+  const W=c.width=c.clientWidth*(window.devicePixelRatio||1);
+  const H=c.height=Math.round(W*0.6);
+  c.style.height=(H/(window.devicePixelRatio||1))+'px';
+  ctx.clearRect(0,0,W,H);
+  if(!eNodes) return;
+  const pad=60;
+  const mapX=n=>pad+(n.x+1)/2*(W-pad*2);
+  const mapY=n=>pad+(n.y+1)/2*(H-pad*2);
+  ctx.strokeStyle='rgba(16,163,127,0.12)';ctx.lineWidth=1;
+  for(const [i,j] of eEdges){if(eNodes[i]&&eNodes[j]){ctx.beginPath();ctx.moveTo(mapX(eNodes[i]),mapY(eNodes[i]));ctx.lineTo(mapX(eNodes[j]),mapY(eNodes[j]));ctx.stroke();}}
+  const dpr=window.devicePixelRatio||1;
+  let hovered=null;let minDist=20*dpr;
+  for(const n of eNodes){const x=mapX(n),y=mapY(n);const dist=Math.hypot(x-eMouseX,y-eMouseY);if(dist<minDist){minDist=dist;hovered=n;}}
+  for(const n of eNodes){
+    const x=mapX(n),y=mapY(n);
+    ctx.beginPath();
+    ctx.arc(x,y,(n===hovered?5:3)*dpr,0,Math.PI*2);
+    ctx.fillStyle = (n===hovered)?'#fff':'#10a37f';
+    ctx.fill();
+    ctx.fillStyle = (n===hovered)?'#fff':'#a0a0a0';
+    ctx.font = `${(n===hovered?11:9)*dpr}px IBM Plex Mono,monospace`;
+    ctx.textAlign='center';
+    ctx.fillText(n.word, x, y-8*dpr);
+  }
+}
+embeddingCanvas.addEventListener('mousemove',e=>{const r=embeddingCanvas.getBoundingClientRect();eMouseX=(e.clientX-r.left)*(embeddingCanvas.width/r.width);eMouseY=(e.clientY-r.top)*(embeddingCanvas.height/r.height);drawEmbeddings();});
+embeddingCanvas.addEventListener('mouseleave',()=>{eMouseX=-1;eMouseY=-1;drawEmbeddings();});
+
+/* ── Sample Pagination ─────────────────────────────── */
+let predictionsList=[];let predIdx=0;const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function renderSample(){if(!predictionsList.length) return;const p=predictionsList[predIdx];document.getElementById('samplePage').textContent=`${predIdx+1}/${predictionsList.length}`;document.getElementById('predsContainer').innerHTML=`<div class="sample"><div class="sample-label src">Source</div><div class="sample-text">${esc(p.source||'')}</div><div class="sample-label tgt" style="margin-top:10px">Target</div><div class="sample-text">${esc(p.target||'')}</div><div class="sample-label pred" style="margin-top:10px">Predicted</div><div class="sample-text">${esc(p.predicted||'')}</div></div>`;}
+window.prevSample=()=>{if(predIdx>0){predIdx--;renderSample();}};
+window.nextSample=()=>{if(predIdx<predictionsList.length-1){predIdx++;renderSample();}};
+
+/* ── Utility ─────────────────────────────────────── */
+function trim(chart,max){if(chart.data.labels.length>max){const cut=chart.data.labels.length-max;chart.data.labels.splice(0,cut);chart.data.datasets.forEach(d=>{if(Array.isArray(d.data)&&typeof d.data[0]!=='object')d.data.splice(0,cut);});}}
+function calcIQ(acc){if(acc==null) return '–';let iq=Math.round(50+(acc*100));return Math.min(Math.max(iq,50),160);} 
+
+/* ── Polling ───────────────────────────────────────── */
+let pT=0,pL=0,pG=0,pA=0;
+async function poll(){try{const r=await fetch('/api/metrics');if(!r.ok)return;const m=await r.json();
+  document.getElementById('statusText').textContent=m.status||'…';
+  document.getElementById('statusPill').classList.toggle('done',m.status==='complete');
+  document.getElementById('mEpoch').textContent=`${m.currentEpoch||0}/${m.totalEpochs||0}`;
+  document.getElementById('mBatch').textContent=`${m.currentBatch||0}/${m.totalBatches||0}`;
+  const tl=m.trainLosses?.at(-1);document.getElementById('mTrainLoss').textContent=tl!=null?tl.toFixed(4):'–';
+  const sl=m.smoothedLoss?.at(-1);document.getElementById('mSmoothed').textContent=sl!=null?sl.toFixed(4):'–';
+  const vl=m.valLosses?.at(-1);document.getElementById('mValLoss').textContent=vl!=null?vl.toFixed(4):'–';
+  const ac=m.trainAccuracies?.at(-1);
+  document.getElementById('mAccuracy').textContent=ac!=null?(ac*100).toFixed(1)+'%':'–';
+  document.getElementById('mIQ').textContent=calcIQ(ac);
+  const gn=m.gradNorms?.at(-1);document.getElementById('mGradNorm').textContent=gn!=null?gn.toFixed(2):'–';
+  // Apply dynamic border color based on gradient norm
+  const gradElem = document.getElementById('gradMetric');
+  if (gradElem) {
+    gradElem.style.borderColor = gn == null ? 'var(--border)' : (gn < 1 ? '#2ecc71' : (gn < 2 ? '#f1c40f' : '#e74c3c'));
+  }
+  const pp=m.perplexities?.at(-1);document.getElementById('mPpl').textContent=pp!=null?pp.toFixed(1):'–';
+  document.getElementById('mSpeed').textContent=m.tokensPerSecond?m.tokensPerSecond.toLocaleString()+' t/s':'–';
+  const s=m.elapsedSeconds||0;document.getElementById('mTime').textContent=`${Math.floor(s/3600)}h ${Math.floor(s/60)%60}m ${s%60}s`;
+  const total=(m.totalBatches||1)*(m.totalEpochs||1), cur=((m.currentEpoch||1)-1)*(m.totalBatches||1)+(m.currentBatch||0);
+  document.getElementById('progressFill').style.width=Math.min(100,cur/total*100)+'%';
+  document.getElementById('mParams').textContent=m.modelParams?m.modelParams.toLocaleString():'–';
+  document.getElementById('mBatchTime').textContent=m.batchTime?.toFixed(2)||'–';
+  document.getElementById('mMemory').textContent=m.memoryUsage?.toFixed(2)+' GB'||'–';
+  document.getElementById('mAttnEntropy').textContent=m.attnEntropy?.toFixed(3)||'–';
+  if(m.trainLosses&&m.trainLosses.length>pT){const raw=m.trainLosses.slice(pT),sm=m.smoothedLoss?.slice(pT)||[];raw.forEach((v,i)=>{lossChart.data.labels.push(pT+i+1);lossChart.data.datasets[0].data.push(v);lossChart.data.datasets[1].data.push(sm[i]??v)});pT=m.trainLosses.length;if(m.valLosses){const vd=lossChart.data.datasets[2];vd.data=[];m.valLosses.forEach((v,i)=>vd.data.push({x:(i+1)*(m.totalBatches||1),y:v}));}trim(lossChart,600);lossChart.update('none');}
+  if(m.trainAccuracies&&m.trainAccuracies.length>pA){m.trainAccuracies.slice(pA).forEach((v,i)=>{accChart.data.labels.push(pA+i+1);accChart.data.datasets[0].data.push(v)});pA=m.trainAccuracies.length;if(m.epochValAccuracies){const vd=accChart.data.datasets[1];vd.data=[];m.epochValAccuracies.forEach((v,i)=>vd.data.push({x:(i+1)*(m.totalBatches||1),y:v}));}trim(accChart,600);accChart.update('none');}
+  if(m.learningRates&&m.learningRates.length>pL){m.learningRates.slice(pL).forEach((v,i)=>{lrChart.data.labels.push(pL+i+1);lrChart.data.datasets[0].data.push(v)});pL=m.learningRates.length;trim(lrChart,600);lrChart.update('none');}
+  if(m.gradNorms&&m.gradNorms.length>pG){m.gradNorms.slice(pG).forEach((v,i)=>{gradChart.data.labels.push(pG+i+1);gradChart.data.datasets[0].data.push(v)});pG=m.gradNorms.length;trim(gradChart,600);gradChart.update('none');}
+  if(m.perplexities?.length){pplChart.data.labels=m.perplexities.map((_,i)=>`E${i+1}`);pplChart.data.datasets[0].data=[...m.perplexities];pplChart.update('none');}
+  if(m.attentionWeights?.length){hData=m.attentionWeights;hTokens=m.attentionSrcTokens||[];drawHeatmap();}
+  if(m.embeddingNodes?.length){eNodes=m.embeddingNodes; eEdges=m.embeddingEdges||[];drawEmbeddings();}
+  if(m.predictions?.length && JSON.stringify(predictionsList)!==JSON.stringify(m.predictions)){predictionsList=m.predictions;predIdx=0;renderSample();}
+  if(m.epochTrainLosses?.length){document.getElementById('epochBody').innerHTML=m.epochTrainLosses.map((t,i)=>{const v=m.valLosses?.[i]??'–',p=m.perplexities?.[i]??'–',a=m.epochValAccuracies?.[i];const iq= a!=null?calcIQ(a):'–';const best=m.valLosses&&v===Math.min(...m.valLosses);return `<tr><td>${i+1}</td><td>${t.toFixed(4)}</td><td>${typeof v==='number'?v.toFixed(4):v}</td><td>${a!=null?(a*100).toFixed(1)+'%':'–'}</td><td>${typeof p==='number'?p.toFixed(1):p}</td><td>${iq}</td><td>${best?'<span class="tag">Best</span>':''}</td></tr>`;}).join('');}
+}catch(e){document.getElementById('statusText').textContent='Disconnected';}}
+setInterval(poll,2000);poll();
+</script>
+</body>
+</html>
