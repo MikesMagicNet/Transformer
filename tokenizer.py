@@ -29,6 +29,8 @@
 import re
 import json
 import os
+import time
+import logging
 from collections import Counter
 from datasets import load_dataset
 
@@ -63,26 +65,22 @@ def tokenize(text):
     """
     Splits a raw string into a list of lowercase word tokens.
 
-    Improved for the Claude Opus reasoning dataset:
+    Steps:
       1. Lowercase everything         → "The Cat!" becomes "the cat!"
-      2. Keep letters, digits, and key punctuation that carries meaning
-         for code/math/reasoning (e.g. parentheses, colons, equals, etc.)
+      2. Keep only letters, digits,    → strips punctuation like ! , . " etc.
+         and spaces
       3. Split on whitespace           → "the cat" becomes ["the", "cat"]
 
     Args:
-        text (str): Any raw string, e.g. a conversation or article.
+        text (str): Any raw string, e.g. a Wikipedia article.
 
     Returns:
         list[str]: Individual word tokens.
                    Example: ["the", "cat", "sat", "on", "the", "mat"]
     """
-    text = text.lower()                                 # ... normalize case
-    # Keep alphanumeric, basic punctuation meaningful for code/math/reasoning
-    # This preserves: . , : ; ( ) [ ] { } = + - * / < > ? ! @ # $ % & _ | ~ ^ '
-    text = re.sub(r"[^\w\s.,;:!?(){}[\]=+\-*/<>@#$%&|~^'\"\\]", " ", text)
-    # Collapse multiple spaces
-    text = re.sub(r"\s+", " ", text).strip()
-    tokens = text.split()                                # ... split on whitespace
+    text = text.lower()                          # ... normalize case
+    text = re.sub(r"[^a-z0-9\s]", "", text)      # ... remove non-alphanumeric chars
+    tokens = text.split()                         # ... split on whitespace into words
     return tokens
 
 
@@ -131,6 +129,13 @@ class WordTokenizer:
 
         self.vocabSize = len(SPECIAL_TOKENS)  # ... starts at 4, grows as we add words
 
+        # Debug tracking
+        self._encodeCount = 0
+        self._totalTokensEncoded = 0
+        self._totalUnkTokens = 0
+        self._unkWords = Counter()  # tracks which words hit UNK most often
+        self._encodeTimes = []
+
 
     # ─── BUILD VOCABULARY ─────────────────────────────────────────────────────
 
@@ -144,8 +149,6 @@ class WordTokenizer:
           2. Count how often each word appears (Counter).
           3. Keep only words that appear >= minFrequency times.
           4. Assign each surviving word a unique integer ID.
-             Words are sorted by frequency (most common first) for
-             better cache locality during training.
 
         Args:
             texts (list[str]): A list of raw strings (e.g., Wikipedia articles).
@@ -159,41 +162,32 @@ class WordTokenizer:
 
         # Step 1 & 2: Count every word across all texts
         wordCounts = Counter()  # ... dict-like: {"the": 98234, "cat": 412, ...}
-        totalTokens = 0
-        for i, text in enumerate(texts):
+        for text in texts:
             words = tokenize(text)
             wordCounts.update(words)  # ... adds each word's count
-            totalTokens += len(words)
-            if (i + 1) % 2000 == 0:
-                print(f"  Scanned {i+1:,}/{len(texts):,} texts...")
 
         # Step 3 & 4: Filter by frequency, assign IDs
-        # Sort by frequency descending — most common words get lowest IDs
-        # This improves cache locality during embedding lookups
+        # nextId starts after special tokens (which already took IDs 0–3)
         nextId = len(SPECIAL_TOKENS)  # ... = 4
         keptCount = 0
         droppedCount = 0
 
-        for word, count in wordCounts.most_common():
+        for word, count in wordCounts.items():
             if count >= self.minFrequency:
+                # This word appears often enough → give it an ID
                 self.word2id[word] = nextId
                 self.id2word[nextId] = word
                 nextId += 1
                 keptCount += 1
             else:
+                # Too rare → will map to <UNK> at encode time
                 droppedCount += 1
 
         self.vocabSize = nextId  # ... total tokens = special + kept words
 
-        # Compute UNK rate — what fraction of tokens will become <UNK>
-        unkTokens = sum(c for w, c in wordCounts.items() if c < self.minFrequency)
-        unkRate = unkTokens / max(totalTokens, 1) * 100
-
-        print(f"  Total tokens scanned: {totalTokens:,}")
         print(f"  Words seen:    {len(wordCounts):,}")
         print(f"  Words kept:    {keptCount:,}  (appeared >= {self.minFrequency} times)")
         print(f"  Words dropped: {droppedCount:,}  (too rare → mapped to <UNK>)")
-        print(f"  UNK rate:      {unkRate:.1f}% of tokens will map to <UNK>")
         print(f"  Final vocabSize: {self.vocabSize:,}")
         print(f"  (This number goes into Inputs(dModel, vocabSize) in model.py)\n")
 
@@ -231,29 +225,48 @@ class WordTokenizer:
             >>> tok.encode("The cat sat", maxLength=8)
             [2, 4, 127, 853, 3, 0, 0, 0]  # padded with <PAD> to length 8
         """
+        t0 = time.perf_counter()
         words = tokenize(text)
 
         # Look up each word → its integer ID (or <UNK>'s ID if not in vocab)
         unkId = self.word2id[UNK_TOKEN]  # ... = 1
-        ids = [self.word2id.get(word, unkId) for word in words]
-        # ... .get(word, unkId) returns the word's ID if found, else unkId
+        ids = []
+        unkCount = 0
+        for word in words:
+            wid = self.word2id.get(word, unkId)
+            if wid == unkId and word not in SPECIAL_TOKENS:
+                unkCount += 1
+                self._unkWords[word] += 1
+            ids.append(wid)
+
+        # Track UNK rate for bottleneck detection
+        self._encodeCount += 1
+        self._totalTokensEncoded += len(words)
+        self._totalUnkTokens += unkCount
+        if words:
+            unkRate = unkCount / len(words)
+            if unkRate > 0.15:
+                logging.warning(
+                    f"Tokenizer: high UNK rate {unkRate:.1%} "
+                    f"({unkCount}/{len(words)} tokens). "
+                    f"Vocab may be too small or minFrequency too high."
+                )
 
         # Wrap with <SOS> at the start and <EOS> at the end
         if addSpecialTokens:
             ids = [self.word2id[SOS_TOKEN]] + ids + [self.word2id[EOS_TOKEN]]
-            # ... now ids looks like: [2, ...word_ids..., 3]
 
         # Truncate if too long (must fit within model's sequenceLength)
         if maxLength is not None:
-            ids = ids[:maxLength]  # ... chop off anything beyond maxLength
+            ids = ids[:maxLength]
 
         # Pad if too short (fill remaining slots with <PAD> = 0)
         if maxLength is not None:
-            padId = self.word2id[PAD_TOKEN]  # ... = 0
+            padId = self.word2id[PAD_TOKEN]
             paddingNeeded = maxLength - len(ids)
             ids = ids + [padId] * paddingNeeded
-            # ... e.g., [2, 4, 127, 3] + [0, 0, 0, 0] for maxLength=8
 
+        self._encodeTimes.append(time.perf_counter() - t0)
         return ids
 
 
@@ -287,6 +300,89 @@ class WordTokenizer:
             words.append(word)
 
         return " ".join(words)  # ... glue words back together with spaces
+
+
+    # ─── SELF-CHECK: round-trip validation ─────────────────────────────────────
+
+    def selfCheck(self, testSentences=None):
+        """
+        Validates tokenizer integrity by encoding then decoding test sentences
+        and checking for information loss. Returns True if all checks pass.
+        """
+        if testSentences is None:
+            testSentences = [
+                "the transformer model uses attention",
+                "deep learning is changing the world",
+                "neural networks can learn patterns",
+            ]
+
+        passed = True
+        for sentence in testSentences:
+            encoded = self.encode(sentence, addSpecialTokens=True)
+            decoded = self.decode(encoded, skipSpecialTokens=True)
+            normalized = tokenize(sentence)
+            decodedTokens = decoded.split()
+
+            # Check each non-UNK word survived the round trip
+            for word in normalized:
+                if word in self.word2id and word not in decodedTokens:
+                    logging.error(
+                        f"Self-check FAIL: '{word}' is in vocab but "
+                        f"was lost in round-trip for: '{sentence}'"
+                    )
+                    passed = False
+
+        if passed:
+            print("  ✅ Tokenizer self-check passed (encode↔decode round-trip OK)")
+        else:
+            print("  ⚠️  Tokenizer self-check found issues (see warnings above)")
+        return passed
+
+
+    # ─── DIAGNOSE: surface bottlenecks ─────────────────────────────────────────
+
+    def diagnose(self):
+        """
+        Prints a diagnostic report about tokenizer health.
+        Call after processing data to see if the vocab is a bottleneck.
+        """
+        print("\n" + "─" * 50)
+        print("  TOKENIZER DIAGNOSTICS")
+        print("─" * 50)
+
+        # Vocab stats
+        specialCount = len(SPECIAL_TOKENS)
+        realWords = self.vocabSize - specialCount
+        print(f"  Vocab size:      {self.vocabSize:,} ({realWords:,} words + {specialCount} special)")
+
+        # UNK rate (the #1 tokenizer bottleneck)
+        if self._totalTokensEncoded > 0:
+            globalUnkRate = self._totalUnkTokens / self._totalTokensEncoded
+            print(f"  Global UNK rate: {globalUnkRate:.2%} ({self._totalUnkTokens:,}/{self._totalTokensEncoded:,})")
+            if globalUnkRate > 0.10:
+                print(f"  ⚠️  UNK rate above 10% — consider lowering minFrequency")
+            elif globalUnkRate > 0.05:
+                print(f"  ⚡ UNK rate moderate — model may struggle with rare words")
+            else:
+                print(f"  ✅ UNK rate healthy")
+
+            # Top unknown words
+            if self._unkWords:
+                top = self._unkWords.most_common(10)
+                print(f"  Top unknown words: {', '.join(w for w, _ in top)}")
+        else:
+            print(f"  (no encoding stats yet — call encode() first)")
+
+        # Encoding speed
+        if self._encodeTimes:
+            avgMs = (sum(self._encodeTimes) / len(self._encodeTimes)) * 1000
+            print(f"  Avg encode time: {avgMs:.3f} ms/call ({len(self._encodeTimes):,} calls)")
+            if avgMs > 5.0:
+                print(f"  ⚠️  Encoding is slow — consider caching or batch tokenization")
+            else:
+                print(f"  ✅ Encoding speed OK")
+
+        print("─" * 50 + "\n")
 
 
     # ─── SAVE / LOAD  –  persist the vocabulary to disk ───────────────────────
@@ -395,16 +491,15 @@ def loadClaudeOpusDataset(datasetName="Roman1111111/claude-opus-4.6-10000x", num
     
     This dataset has conversational format with reasoning traces:
       - Each row has 'messages': [{role, content, reasoning?}, ...]
-      - We extract text with structural markers preserved so the model
-        learns the conversation format:
-          [SYSTEM] ... [USER] ... [THINK] ... [/THINK] [ASSISTANT] ...
+      - We extract all text (user question + assistant answer + reasoning)
+        and combine it into a single string for each row.
 
     This teaches the model structured reasoning patterns:
       question → thinking → answer
 
     Args:
         datasetName (str): HuggingFace dataset identifier.
-        numRows (int):     How many rows to load.
+        numRows (int):     How many rows to load (max 9,633).
 
     Returns:
         list[str]: Extracted text from each conversation.
@@ -415,52 +510,27 @@ def loadClaudeOpusDataset(datasetName="Roman1111111/claude-opus-4.6-10000x", num
     dataset = load_dataset(datasetName, split="train", streaming=True)
 
     texts = []
-    skipped = 0
     for i, row in enumerate(dataset):
         if i >= numRows:
             break
 
-        # Extract text with role markers for conversation structure
+        # Extract all text from the conversation messages
         parts = []
         for msg in row.get("messages", []):
-            role = msg.get("role", "").lower()
-            content = msg.get("content", "").strip()
-            reasoning = msg.get("reasoning", "").strip()
-
-            # Extract <reasoning> blocks embedded inside content
-            if not reasoning and content:
-                # Some rows embed reasoning inside <reasoning>...</reasoning> tags
-                match = re.search(r"<reasoning>(.*?)</reasoning>", content, re.DOTALL)
-                if match:
-                    reasoning = match.group(1).strip()
-                    # Remove the reasoning block from content to avoid duplication
-                    content = re.sub(r"<reasoning>.*?</reasoning>", "", content, flags=re.DOTALL).strip()
-
-            # Build structured text with role markers
-            if role == "system" and content:
-                parts.append(f"[SYSTEM] {content}")
-            elif role == "user" and content:
-                parts.append(f"[USER] {content}")
-            elif role == "assistant":
-                if reasoning:
-                    parts.append(f"[THINK] {reasoning} [/THINK]")
-                if content:
-                    parts.append(f"[ASSISTANT] {content}")
+            content = msg.get("content", "")
+            reasoning = msg.get("reasoning", "")
+            if content:
+                parts.append(content)
+            if reasoning:
+                parts.append(reasoning)
 
         if parts:
-            combined = " ".join(parts)
-            # Skip very short conversations (< 20 tokens) — likely garbage
-            if len(combined.split()) >= 20:
-                texts.append(combined)
-            else:
-                skipped += 1
-        else:
-            skipped += 1
+            texts.append(" ".join(parts))
 
         if (i + 1) % 2000 == 0:
             print(f"  Loaded {i + 1:,} rows...")
 
-    print(f"  Done! Loaded {len(texts):,} rows (skipped {skipped} too-short rows).\n")
+    print(f"  Done! Loaded {len(texts):,} rows.\n")
     return texts
 
 
